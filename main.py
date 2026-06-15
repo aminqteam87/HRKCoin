@@ -30,13 +30,10 @@ dp.include_router(router)
 def init_db():
     conn = sqlite3.connect('casino.db')
     c = conn.cursor()
-    # جدول کاربران
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, username TEXT, phone TEXT, balance REAL DEFAULT 0, 
                   referrer INTEGER, pay_count INTEGER DEFAULT 0, withdraw_count INTEGER DEFAULT 0)''')
-    # جدول کانال‌های اجباری
     c.execute('''CREATE TABLE IF NOT EXISTS channels (channel_id TEXT PRIMARY KEY)''')
-    # جدول موقت برای بازی‌های گروهی
     c.execute('''CREATE TABLE IF NOT EXISTS active_games 
                  (game_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, p1_id INTEGER, p2_id INTEGER, 
                   bet REAL, dice_count INTEGER, status TEXT, p1_score INTEGER DEFAULT 0, p2_score INTEGER DEFAULT 0,
@@ -210,8 +207,8 @@ async def rules_menu(message: types.Message):
            f"🎮 **راهنمای جامع بازی‌های گروهی (فقط تاس):**\n" \
            f"شما می‌توانید ربات را به گروه‌های خود اضافه کرده و با دستورات زیر به ۳ حالت مختلف بازی کنید:\n\n" \
            f"**۱. بازی کلاسیک رقابتی (بیشترین مجموع):**\n" \
-           f"📝 `dice [مبلغ]` 👈 مثال: `dice 30` (یک تاس، شرط ۳۰ کوین)\n" \
-           f"📝 `[تعداد] dice [مبلغ]` 👈 مثال: `3 dice 50` (سه تاس، شرط ۵۰ کوین)\n\n" \
+           f"📝 `dice [مبلغ]` 👈 مثال: `dice 30`\n" \
+           f"📝 `[تعداد] dice [مبلغ]` 👈 مثال: `3 dice 50`\n\n" \
            f"**۲. بازی زوج و فرد (Even / Odd):**\n" \
            f"📝 `even [مبلغ]` 👈 مثال: `even 20`\n" \
            f"📝 `odd [مبلغ]` 👈 مثال: `odd 20`\n\n" \
@@ -448,17 +445,14 @@ async def task_throw_timeout(game_id: int, player_no: int):
     chat_id, p1_id, p2_id, bet, p1_thrown, p2_thrown, _, msg_id = game
     
     if player_no == 1 and not p1_thrown:
-        # اگر کاربر ۱ نینداخت و بازی با ربات بود یا PvP
         db_query("UPDATE active_games SET status='timeout' WHERE game_id=?", (game_id,), commit=True)
-        # برگشت پول به بازیکن ۲ در صورت وجود
         if p2_id: db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p2_id), commit=True)
-        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p1_id), commit=True) # برگشت به ۱ جهت لغو
+        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p1_id), commit=True)
         try: await bot.edit_message_text("⏱ **زمان پرتاب تاس بازیکن اول به پایان رسید و بازی لغو شد.**", chat_id, msg_id, parse_mode="Markdown")
         except: pass
 
     elif player_no == 2 and not p2_thrown:
         db_query("UPDATE active_games SET status='timeout' WHERE game_id=?", (game_id,), commit=True)
-        # اگر حریف ربات بود که خودش میندازه (تایم اوت نداره)، پس اینجا حالت PvP هست که بازیکن ۲ نینداخته
         db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p1_id), commit=True)
         db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p2_id), commit=True)
         try: await bot.edit_message_text("⏱ **زمان پرتاب تاس بازیکن دوم به پایان رسید و بازی لغو شد.**", chat_id, msg_id, parse_mode="Markdown")
@@ -469,14 +463,15 @@ async def play_vs_bot_init(call: types.CallbackQuery):
     game_id = int(call.data.split("_")[1])
     game = db_query("SELECT p1_id, bet, dice_count, status FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
-    if not game or game[3] != 'waiting':
-        return await call.answer("⚠️ این بازی منقضی یا شروع شده است.", show_alert=True)
-    if call.from_user.id != game[0]:
-        return await call.answer("❌ فقط سازنده بازی می‌تواند حالت ربات را فعال کند.", show_alert=True)
+    if not game: return await call.answer("❌ این بازی یافت نشد.", show_alert=True)
+    p1_id, bet, dice_count, status = game
+    
+    if status != 'waiting': return await call.answer("⚠️ این بازی منقضی یا شروع شده است.", show_alert=True)
+    if call.from_user.id != p1_id: return await call.answer("❌ فقط سازنده بازی می‌تواند حالت ربات را فعال کند.", show_alert=True)
 
     await call.answer()
     db_query("UPDATE active_games SET status='playing' WHERE game_id=?", (game_id,), commit=True)
-    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (game[1], game[0]), commit=True)
+    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p1_id), commit=True)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 پرتاب تاس شما", callback_data=f"throw1_{game_id}")]])
     await call.message.edit_text(f"🎲 **بازی با ربات آغاز شد!**\n\n👤 {call.from_user.first_name} **۳۰ ثانیه** فرصت داری تا تاس خودت رو پرتاب کنی:", reply_markup=kb, parse_mode="Markdown")
@@ -487,18 +482,18 @@ async def play_vs_user_join(call: types.CallbackQuery):
     game_id = int(call.data.split("_")[1])
     game = db_query("SELECT p1_id, bet, dice_count, status FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
-    if not game or game[3] != 'waiting':
-        return await call.answer("⚠️ این لابی پر شده یا منقضی گردیده است.", show_alert=True)
-    if call.from_user.id == game[0]:
-        return await call.answer("❌ شما نمی‌توانید به بازی خودتان ملحق شوید!", show_alert=True)
+    if not game: return await call.answer("❌ این لابی یافت نشد.", show_alert=True)
+    p1_id, bet, d_count, status = game
+    
+    if status != 'waiting': return await call.answer("⚠️ این لابی پر شده یا منقضی گردیده است.", show_alert=True)
+    if call.from_user.id == p1_id: return await call.answer("❌ شما نمی‌توانید به بازی خودتان ملحق شوید!", show_alert=True)
 
     p2_id = call.from_user.id
     user2 = db_query("SELECT balance FROM users WHERE user_id=?", (p2_id,), fetchone=True)
-    if not user2 or user2[0] < game[1]:
+    if not user2 or user2[0] < bet:
         return await call.answer("❌ موجودی کافی نیست. ابتدا در پیوی شارژ کنید.", show_alert=True)
 
     await call.answer("شما به لابی بازی متصل شدید!")
-    p1_id, bet, d_count = game[0], game[1], game[2]
     
     db_query("UPDATE active_games SET status='playing', p2_id=? WHERE game_id=?", (p2_id, game_id), commit=True)
     db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p1_id), commit=True)
@@ -514,32 +509,34 @@ async def throw_player_one(call: types.CallbackQuery):
     game_id = int(call.data.split("_")[1])
     game = db_query("SELECT p1_id, p2_id, bet, dice_count, status, p1_thrown FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
-    if not game or game[4] != 'playing': return await call.answer("بازی جاری نیست.")
-    if call.from_user.id != game[0]: return await call.answer("❌ نوبت شما نیست!", show_alert=True)
-    if game[5] == 1: return await call.answer("شما قبلاً تاس انداخته‌اید.")
+    if not game: return await call.answer("بازی یافت نشد.")
+    p1_id, p2_id, bet, dice_count, status, p1_thrown = game
+    
+    if status != 'playing': return await call.answer("بازی جاری نیست.")
+    if call.from_user.id != p1_id: return await call.answer("❌ نوبت شما نیست!", show_alert=True)
+    if p1_thrown == 1: return await call.answer("شما قبلاً تاس انداخته‌اید.")
 
     await call.answer("در حال پرتاب...")
     db_query("UPDATE active_games SET p1_thrown=1 WHERE game_id=?", (game_id,), commit=True)
     
     p1_score = 0
     await call.message.answer(f"👤 **پرتاب تاس {call.from_user.first_name}:**")
-    for _ in range(game[3]):
+    for _ in range(dice_count):
         d = await call.message.answer_dice(emoji="🎲")
         p1_score += d.dice.value
         await asyncio.sleep(2.5)
 
     db_query("UPDATE active_games SET p1_score=? WHERE game_id=?", (p1_score, game_id), commit=True)
     
-    p2_id = game[1]
-    if not p2_id: # بازی با ربات
+    if not p2_id: 
         await call.message.answer(f"🤖 **حالا نوبت ربات است:**")
         bot_score = 0
-        for _ in range(game[3]):
+        for _ in range(dice_count):
             d = await call.message.answer_dice(emoji="🎲")
             bot_score += d.dice.value
             await asyncio.sleep(2.5)
-        await process_winner(call.message.chat.id, game[0], None, p1_score, bot_score, game[2])
-    else: # بازی PvP با کاربر دیگر
+        await process_winner(call.message.chat.id, p1_id, None, p1_score, bot_score, bet)
+    else: 
         p2_name = (await bot.get_chat(p2_id)).first_name
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 پرتاب تاس حریف", callback_data=f"throw2_{game_id}")]])
         await call.message.answer(f"⏱ مجموع امتیاز شما: **{p1_score}**\n\nنوبت بازیکن دوم (**{p2_name}**) است که تاس خود را پرتاب کند (۳۰ ثانیه فرصت):", reply_markup=kb, parse_mode="Markdown")
@@ -550,22 +547,25 @@ async def throw_player_two(call: types.CallbackQuery):
     game_id = int(call.data.split("_")[1])
     game = db_query("SELECT p1_id, p2_id, bet, dice_count, status, p2_thrown, p1_score FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
-    if not game or game[4] != 'playing': return await call.answer("بازی فعال نیست.")
-    if call.from_user.id != game[1]: return await call.answer("❌ این دکمه مخصوص بازیکن دوم است!", show_alert=True)
-    if game[5] == 1: return await call.answer("شما قبلاً تاس انداخته‌اید.")
+    if not game: return await call.answer("بازی فعال نیست.")
+    p1_id, p2_id, bet, dice_count, status, p2_thrown, p1_score = game
+    
+    if status != 'playing': return await call.answer("بازی فعال نیست.")
+    if call.from_user.id != p2_id: return await call.answer("❌ این دکمه مخصوص بازیکن دوم است!", show_alert=True)
+    if p2_thrown == 1: return await call.answer("شما قبلاً تاس انداخته‌اید.")
 
     await call.answer("در حال پرتاب...")
     db_query("UPDATE active_games SET p2_thrown=1 WHERE game_id=?", (game_id,), commit=True)
     
     p2_score = 0
     await call.message.answer(f"👤 **پرتاب تاس {call.from_user.first_name}:**")
-    for _ in range(game[3]):
+    for _ in range(dice_count):
         d = await call.message.answer_dice(emoji="🎲")
         p2_score += d.dice.value
         await asyncio.sleep(2.5)
 
     db_query("UPDATE active_games SET p2_score=?, status='finished' WHERE game_id=?", (p2_score, game_id), commit=True)
-    await process_winner(call.message.chat.id, game[0], game[1], game[6], p2_score, game[2])
+    await process_winner(call.message.chat.id, p1_id, p2_id, p1_score, p2_score, bet)
 
 # ---- 2. حالت زوج و فرد ----
 @router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.regexp(r'^(even|odd) (\d+(\.\d+)?)$', flags=re.IGNORECASE))
