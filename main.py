@@ -30,9 +30,11 @@ dp.include_router(router)
 def init_db():
     conn = sqlite3.connect('casino.db')
     c = conn.cursor()
+    # جدول کاربران
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, username TEXT, phone TEXT, balance REAL DEFAULT 0, 
                   referrer INTEGER, pay_count INTEGER DEFAULT 0, withdraw_count INTEGER DEFAULT 0)''')
+    # جدول کانال‌های اجباری
     c.execute('''CREATE TABLE IF NOT EXISTS channels (channel_id TEXT PRIMARY KEY)''')
     # جدول موقت برای بازی‌های گروهی
     c.execute('''CREATE TABLE IF NOT EXISTS active_games 
@@ -56,9 +58,9 @@ init_db()
 
 # ================= FSM States =================
 class WithdrawFSM(StatesGroup):
-    type = State() # ton or irt
+    type = State()
     amount = State()
-    destination = State() # card or wallet
+    destination = State()
     memo = State()
 
 class AdminFSM(StatesGroup):
@@ -80,7 +82,7 @@ def admin_menu():
         [KeyboardButton(text="💵 شارژ کاربر")]
     ], resize_keyboard=True)
 
-# ================= Middleware / Helpers =================
+# ================= Helper Functions =================
 async def check_channels(user_id):
     channels = db_query("SELECT channel_id FROM channels", fetchall=True)
     if not channels: return True
@@ -89,8 +91,45 @@ async def check_channels(user_id):
             member = await bot.get_chat_member(chat_id=ch, user_id=user_id)
             if member.status in ['left', 'kicked']: return False
         except TelegramBadRequest:
-            pass # ربات در کانال ادمین نیست
+            pass # ربات در کانال ادمین نیست یا کانال وجود ندارد
     return True
+
+async def process_winner(message, p1_id, p2_id, score1, score2, bet):
+    pool = bet * 2
+    rake = pool * FEE_PERCENT
+    win_amount = pool - rake
+    
+    p1_name = (await bot.get_chat(p1_id)).first_name
+    p2_name = "ربات" if not p2_id else (await bot.get_chat(p2_id)).first_name
+    
+    win_id = None
+    if score1 > score2:
+        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, p1_id), commit=True)
+        winner, win_score, lose_score = p1_name, score1, score2
+        win_id = p1_id
+    elif score2 > score1:
+        if p2_id: db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, p2_id), commit=True)
+        winner, win_score, lose_score = p2_name, score2, score1
+        win_id = p2_id
+    else:
+        # مساوی - برگشت پول
+        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p1_id), commit=True)
+        if p2_id: db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p2_id), commit=True)
+        await message.answer(f"🤝 **مساوی!**\n\nامتیازها: {score1} - {score2}\nمبلغ شرط به حساب هر دو برگشت داده شد.", parse_mode="Markdown")
+        return
+
+    text = f"🎉 **کاربر {winner} برنده شد!**\n\n" \
+           f"امتیازها: {win_score} - {lose_score}\n" \
+           f"💰 مبلغ **{win_amount:.2f} HRK** به حساب برنده واریز شد (پس از کسر کارمزد)."
+    
+    # سود زیرمجموعه‌گیری
+    if win_id:
+        ref = db_query("SELECT referrer FROM users WHERE user_id=?", (win_id,), fetchone=True)
+        if ref and ref[0]:
+            ref_bonus = bet * 0.20 # 20% مبلغ شرط
+            db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (ref_bonus, ref[0]), commit=True)
+            
+    await message.answer(text, parse_mode="Markdown")
 
 # ================= Private Chat Handlers =================
 
@@ -98,6 +137,7 @@ async def check_channels(user_id):
 async def start_cmd(message: types.Message, command: Command):
     args = command.args
     referrer = int(args) if args and args.isdigit() else None
+    if referrer == message.from_user.id: referrer = None
     
     user = db_query("SELECT phone FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
     if not user:
@@ -111,7 +151,7 @@ async def start_cmd(message: types.Message, command: Command):
         if not is_joined:
             await message.answer("❌ ابتدا باید در کانال‌های اسپانسر عضو شوید و سپس دوباره /start را ارسال کنید.")
             return
-        await message.answer("🎮 به ربات بازی HRK خوش آمدید!", reply_markup=main_menu())
+        await message.answer("🎮 به پلتفرم بازی HRK خوش آمدید!", reply_markup=main_menu())
 
 @router.message(F.contact, F.chat.type == 'private')
 async def contact_handler(message: types.Message):
@@ -141,16 +181,34 @@ async def wallet_menu(message: types.Message):
     ])
     await message.answer("💳 **بخش کیف پول**\nعملیات مورد نظر را انتخاب کنید:", reply_markup=kb, parse_mode="Markdown")
 
+@router.message(F.text == "🤝 زیرمجموعه گیری", F.chat.type == 'private')
+async def ref_menu(message: types.Message):
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+    refs = db_query("SELECT COUNT(*) FROM users WHERE referrer=?", (message.from_user.id,), fetchone=True)
+    ref_count = refs[0] if refs else 0
+    text = f"🔥 **بخش زیرمجموعه‌گیری**\n\nتعداد کاربران دعوت شده: **{ref_count} نفر**\n\n" \
+           f"🎁 با دعوت دوستان، **20%** از سود بازی‌های آن‌ها به صورت خودکار به شما تعلق می‌گیرد!\n\nلینک اختصاصی شما:\n`{link}`"
+    await message.answer(text, parse_mode="Markdown")
+
+@router.message(F.text == "⚖️ آموزش و مقررات", F.chat.type == 'private')
+async def rules_menu(message: types.Message):
+    text = f"📚 **آموزش و مقررات پلتفرم بازی HRK**\n\n" \
+           f"🔸 نرخ هر کوین: **{HRK_RATE:,} تومان**\n\n" \
+           f"🎮 **نحوه بازی در گروه:**\n" \
+           f"ربات را در گروه اد کرده و دستورات زیر را ارسال کنید:\n" \
+           f"🎲 `dice 30` (1 تاس - شرط 30)\n" \
+           f"🎲 `3 dice 50` (3 تاس - شرط 50)"
+    await message.answer(text, parse_mode="Markdown")
+
+# --- Wallet Sub-Menus ---
 @router.callback_query(F.data == "wallet_deposit")
 async def deposit_info(call: types.CallbackQuery):
-    text = f"📥 **شارژ حساب کاربری**\n\n" \
-           f"نرخ هر توکن: **{HRK_RATE:,} تومان**\n" \
-           f"شما می‌توانید مبلغ خود را به صورت **ریالی** یا **کریپتو (TON)** واریز کنید.\n\n" \
-           f"💬 برای دریافت شماره کارت یا آدرس ولت و افزایش شارژ، به پشتیبانی پیام دهید:"
+    text = f"📥 **شارژ حساب کاربری**\n\nنرخ توکن: **{HRK_RATE:,} تومان**\n" \
+           f"💬 برای واریز ریالی یا ارزی (TON) به پشتیبانی پیام دهید:"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎧 ارتباط با پشتیبانی", url=f"https://t.me/{SUPPORT_ID.replace('@','')}")]])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-# --- Withdraw Flow ---
 @router.callback_query(F.data == "wallet_withdraw")
 async def withdraw_start(call: types.CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -161,12 +219,10 @@ async def withdraw_start(call: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.in_(["wd_ton", "wd_irt"]))
 async def withdraw_type(call: types.CallbackQuery, state: FSMContext):
-    w_type = "تون کوین (TON)" if call.data == "wd_ton" else "ریالی (کارت بانکی)"
+    w_type = "تون کوین (TON)" if call.data == "wd_ton" else "ریالی"
     await state.update_data(type=call.data)
     user = db_query("SELECT balance FROM users WHERE user_id=?", (call.from_user.id,), fetchone=True)
-    text = f"شما درخواست برداشت **{w_type}** را دارید.\n" \
-           f"موجودی فعلی شما: **{user[0]:.2f} HRK**\n\n" \
-           f"مقدار کوین (HRK) که قصد برداشت دارید را به صورت عدد لاتین ارسال کنید:"
+    text = f"شما درخواست برداشت **{w_type}** دارید.\nموجودی: **{user[0]:.2f} HRK**\n\nمقدار کوین برای برداشت را ارسال کنید:"
     await call.message.edit_text(text, parse_mode="Markdown")
     await state.set_state(WithdrawFSM.amount)
 
@@ -176,28 +232,23 @@ async def withdraw_amount(message: types.Message, state: FSMContext):
         amount = float(message.text)
         user = db_query("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
         if amount <= 0 or amount > user[0]:
-            await message.answer("❌ مبلغ نامعتبر است یا موجودی کافی نیست. مجدد ارسال کنید:")
+            await message.answer("❌ مبلغ نامعتبر است یا موجودی کافی نیست.")
             return
-        
         await state.update_data(amount=amount)
         data = await state.get_data()
-        
-        if data['type'] == 'wd_irt':
-            await message.answer("💳 لطفاً شماره کارت 16 رقمی خود را به همراه نام صاحب حساب ارسال کنید:")
-        else:
-            await message.answer("💎 لطفاً آدرس کیف پول TON خود را ارسال کنید:")
+        msg = "💳 شماره کارت 16 رقمی و نام صاحب حساب:" if data['type'] == 'wd_irt' else "💎 آدرس کیف پول TON:"
+        await message.answer(msg)
         await state.set_state(WithdrawFSM.destination)
     except ValueError:
-        await message.answer("❌ لطفاً فقط عدد ارسال کنید.")
+        await message.answer("❌ لطفاً عدد ارسال کنید.")
 
 @router.message(WithdrawFSM.destination)
 async def withdraw_dest(message: types.Message, state: FSMContext):
     await state.update_data(destination=message.text)
     data = await state.get_data()
-    
     if data['type'] == 'wd_ton':
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="نیاز نیست")]], resize_keyboard=True)
-        await message.answer("📝 در صورت نیاز به Memo / Comment آن را ارسال کنید، در غیر این صورت دکمه زیر را بزنید:", reply_markup=kb)
+        await message.answer("📝 در صورت نیاز به Memo آن را بفرستید، در غیر اینصورت دکمه زیر را بزنید:", reply_markup=kb)
         await state.set_state(WithdrawFSM.memo)
     else:
         await finish_withdraw(message, state)
@@ -209,77 +260,115 @@ async def withdraw_memo(message: types.Message, state: FSMContext):
 
 async def finish_withdraw(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    amount = data['amount']
-    dest = data['destination']
-    memo = data.get('memo', 'ندارد')
+    amount, dest, memo = data['amount'], data['destination'], data.get('memo', 'ندارد')
     w_type = "ریالی" if data['type'] == 'wd_irt' else "ارزی (TON)"
     
-    # کم کردن موجودی و ثبت درخواست
     db_query("UPDATE users SET balance = balance - ?, withdraw_count = withdraw_count + 1 WHERE user_id=?", (amount, message.from_user.id), commit=True)
     
-    req_text = f"🚨 **درخواست برداشت جدید**\n\n" \
-               f"👤 کاربر: `{message.from_user.id}`\n" \
-               f"نوع: {w_type}\nمبلغ: {amount} HRK\nمقصد: `{dest}`\nممو: `{memo}`"
-    
+    req_text = f"🚨 **درخواست برداشت**\n\n👤 آیدی: `{message.from_user.id}`\nنوع: {w_type}\nمبلغ: {amount} HRK\nمقصد: `{dest}`\nممو: `{memo}`"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ تایید و واریز شد", callback_data=f"approve_{message.from_user.id}_{amount}"),
          InlineKeyboardButton(text="❌ رد درخواست", callback_data=f"reject_{message.from_user.id}_{amount}")]
     ])
     
     await bot.send_message(ADMIN_ID, req_text, reply_markup=kb, parse_mode="Markdown")
-    await message.answer("✅ درخواست برداشت شما با موفقیت ثبت شد و پس از بررسی ادمین به حساب شما واریز خواهد شد.", reply_markup=main_menu())
+    await message.answer("✅ درخواست شما ثبت و برای ادمین ارسال شد.", reply_markup=main_menu())
     await state.clear()
 
-# --- Admin Panel ---
+# ================= Admin Logic =================
 @router.message(Command("panel"), F.from_user.id == ADMIN_ID)
 async def admin_panel(message: types.Message):
     await message.answer("👨‍💻 پنل مدیریت:", reply_markup=admin_menu())
 
+@router.message(F.text == "➕ افزودن کانال", F.from_user.id == ADMIN_ID)
+async def admin_add_ch(message: types.Message, state: FSMContext):
+    await message.answer("آیدی کانال را با @ بفرستید:")
+    await state.set_state(AdminFSM.add_channel)
+
+@router.message(AdminFSM.add_channel, F.from_user.id == ADMIN_ID)
+async def admin_add_ch_exec(message: types.Message, state: FSMContext):
+    db_query("INSERT OR IGNORE INTO channels (channel_id) VALUES (?)", (message.text,), commit=True)
+    await message.answer(f"✅ کانال {message.text} اضافه شد.", reply_markup=admin_menu())
+    await state.clear()
+
+@router.message(F.text == "➖ حذف کانال", F.from_user.id == ADMIN_ID)
+async def admin_rem_ch(message: types.Message, state: FSMContext):
+    chs = db_query("SELECT channel_id FROM channels", fetchall=True)
+    text = "کانال‌ها:\n" + "\n".join([c[0] for c in chs]) + "\n\nآیدی جهت حذف:" if chs else "لیست خالی است."
+    await message.answer(text)
+    await state.set_state(AdminFSM.remove_channel)
+
+@router.message(AdminFSM.remove_channel, F.from_user.id == ADMIN_ID)
+async def admin_rem_ch_exec(message: types.Message, state: FSMContext):
+    db_query("DELETE FROM channels WHERE channel_id=?", (message.text,), commit=True)
+    await message.answer(f"✅ کانال {message.text} حذف شد.", reply_markup=admin_menu())
+    await state.clear()
+
 @router.message(F.text == "💵 شارژ کاربر", F.from_user.id == ADMIN_ID)
 async def admin_charge_ask(message: types.Message, state: FSMContext):
-    await message.answer("آیدی عددی کاربر مورد نظر را ارسال کنید:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("آیدی عددی کاربر:")
     await state.set_state(AdminFSM.charge_user)
 
 @router.message(AdminFSM.charge_user, F.from_user.id == ADMIN_ID)
-async def admin_charge_user(message: types.Message, state: FSMContext):
+async def admin_charge_u(message: types.Message, state: FSMContext):
     await state.update_data(user_id=int(message.text))
-    await message.answer("مقدار HRK برای شارژ را ارسال کنید:")
+    await message.answer("مقدار HRK برای شارژ:")
     await state.set_state(AdminFSM.charge_amount)
 
 @router.message(AdminFSM.charge_amount, F.from_user.id == ADMIN_ID)
 async def admin_charge_exec(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    amount = float(message.text)
-    u_id = data['user_id']
-    
+    amount, u_id = float(message.text), data['user_id']
     db_query("UPDATE users SET balance = balance + ?, pay_count = pay_count + 1 WHERE user_id=?", (amount, u_id), commit=True)
-    await message.answer(f"✅ حساب کاربر {u_id} به مبلغ {amount} HRK شارژ شد.", reply_markup=admin_menu())
-    try:
-        await bot.send_message(u_id, f"🎉 حساب کاربری شما مبلغ **{amount} HRK** شارژ شد!", parse_mode="Markdown")
+    await message.answer(f"✅ کاربر {u_id} مبلغ {amount} HRK شارژ شد.", reply_markup=admin_menu())
+    try: await bot.send_message(u_id, f"🎉 حساب شما **{amount} HRK** شارژ شد!", parse_mode="Markdown")
     except: pass
     await state.clear()
 
+@router.callback_query(F.data.startswith("approve_"), F.from_user.id == ADMIN_ID)
+async def admin_approve_req(call: types.CallbackQuery):
+    _, u_id, amount = call.data.split("_")
+    await call.message.edit_text(call.message.text + "\n\n✅ تایید شد.")
+    try: await bot.send_message(int(u_id), f"✅ درخواست برداشت **{amount} HRK** شما تایید و واریز شد.", parse_mode="Markdown")
+    except: pass
+
+@router.callback_query(F.data.startswith("reject_"), F.from_user.id == ADMIN_ID)
+async def admin_reject_req(call: types.CallbackQuery):
+    _, u_id, amount = call.data.split("_")
+    db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (float(amount), int(u_id)), commit=True)
+    await call.message.edit_text(call.message.text + "\n\n❌ رد شد (مبلغ برگشت داده شد).")
+    try: await bot.send_message(int(u_id), f"❌ درخواست برداشت **{amount} HRK** رد شد و مبلغ به کیف پول شما برگشت.", parse_mode="Markdown")
+    except: pass
+
 # ================= Group Game Logic =================
+
+@router.message(F.chat.type.in_({'group', 'supergroup'}), F.text == "بازی ها")
+async def group_games_menu(message: types.Message):
+    text = f"🎮 **راهنمای بازی‌ها**\n\n🎲 `dice 30` (1 تاس با شرط 30)\n🎲 `3 dice 50` (3 تاس با شرط 50)\n💰 `wallet` (موجودی)"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ثبت‌نام / شارژ", url=f"https://t.me/{(await bot.get_me()).username}")]])
+    await message.reply(text, reply_markup=kb)
 
 @router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.lower().in_(["wallet", "balance"]))
 async def group_balance(message: types.Message):
     user = db_query("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
     if user:
-        bal = user[0]
-        await message.reply(f"💰 Balance: **{bal:.2f} HRK**\n🇮🇷 IRR: **{(bal * HRK_RATE):,.0f} Toman**", parse_mode="Markdown")
+        await message.reply(f"💰 Balance: **{user[0]:.2f} HRK**\n🇮🇷 IRR: **{(user[0] * HRK_RATE):,.0f} Toman**", parse_mode="Markdown")
     else:
-        await message.reply("Register in bot first: /start")
+        await message.reply("ابتدا در پیوی ربات /start را بزنید.")
 
-# Match English commands: "dice 30" or "3 dice 30"
 @router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.regexp(r'^(\d+ )?dice (\d+(\.\d+)?)$', flags=re.IGNORECASE))
 async def group_dice_init(message: types.Message):
     match = re.match(r'^(\d+ )?dice (\d+(\.\d+)?)$', message.text, re.IGNORECASE)
     dice_count = int(match.group(1).strip()) if match.group(1) else 1
     bet = float(match.group(2))
     
+    if dice_count > 5:
+        await message.reply("❌ حداکثر تعداد تاس 5 عدد می‌باشد.")
+        return
+        
     user = db_query("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,), fetchone=True)
     if not user or user[0] < bet:
-        await message.reply("❌ Insufficient balance or not registered.")
+        await message.reply("❌ موجودی کافی نیست یا ثبت‌نام نکرده‌اید.")
         return
 
     db_query("INSERT INTO active_games (chat_id, p1_id, bet, dice_count, status) VALUES (?, ?, ?, ?, 'waiting')",
@@ -287,12 +376,10 @@ async def group_dice_init(message: types.Message):
     game_id = db_query("SELECT last_insert_rowid()", fetchone=True)[0]
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 Play with Bot", callback_data=f"playbot_{game_id}"),
-         InlineKeyboardButton(text="👤 Join Game (User)", callback_data=f"playuser_{game_id}")]
+        [InlineKeyboardButton(text="🤖 بازی با ربات", callback_data=f"playbot_{game_id}"),
+         InlineKeyboardButton(text="👤 ورود به بازی (کاربر)", callback_data=f"playuser_{game_id}")]
     ])
-    
-    text = f"🎲 **Game Created!**\nPlayer: {message.from_user.first_name}\nBet: {bet} HRK\nMode: {dice_count} Dice\n\nChoose opponent:"
-    await message.reply(text, reply_markup=kb, parse_mode="Markdown")
+    await message.reply(f"🎲 **بازی ساخته شد!**\nمبلغ: {bet} HRK\nتعداد تاس: {dice_count}\nمنتظر حریف...", reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data.startswith("playbot_"))
 async def play_vs_bot(call: types.CallbackQuery):
@@ -300,76 +387,76 @@ async def play_vs_bot(call: types.CallbackQuery):
     game = db_query("SELECT p1_id, bet, dice_count, status FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
     if not game or game[3] != 'waiting':
-        await call.answer("Game already started or expired.", show_alert=True)
-        return
+        return await call.answer("بازی شروع شده یا منقضی شده است.", show_alert=True)
     if call.from_user.id != game[0]:
-        await call.answer("Only the creator can start with the bot.", show_alert=True)
-        return
+        return await call.answer("فقط سازنده میتواند بازی با ربات را انتخاب کند.", show_alert=True)
 
     db_query("UPDATE active_games SET status='playing' WHERE game_id=?", (game_id,), commit=True)
-    await call.message.edit_text("🎲 Rolling vs Bot...")
-    
+    await call.message.edit_text("🎲 در حال پرتاب تاس با ربات...")
     p1_id, bet, d_count = game[0], game[1], game[2]
     db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p1_id), commit=True)
     
-    p1_score = 0
-    bot_score = 0
-    
-    await call.message.answer(f"👤 {call.from_user.first_name}'s turn:")
+    p1_score, bot_score = 0, 0
+    await call.message.answer(f"👤 نوبت {call.from_user.first_name}:")
     for _ in range(d_count):
         d = await call.message.answer_dice(emoji="🎲")
         p1_score += d.dice.value
-        await asyncio.sleep(2)
+        await asyncio.sleep(2.5)
         
-    await call.message.answer(f"🤖 Bot's turn:")
+    await call.message.answer(f"🤖 نوبت ربات:")
     for _ in range(d_count):
         d = await call.message.answer_dice(emoji="🎲")
         bot_score += d.dice.value
-        await asyncio.sleep(2)
+        await asyncio.sleep(2.5)
 
     await process_winner(call.message, p1_id, None, p1_score, bot_score, bet)
 
-async def process_winner(message, p1_id, p2_id, score1, score2, bet):
-    pool = bet * 2
-    rake = pool * FEE_PERCENT
-    win_amount = pool - rake
+@router.callback_query(F.data.startswith("playuser_"))
+async def play_vs_user(call: types.CallbackQuery):
+    game_id = int(call.data.split("_")[1])
+    game = db_query("SELECT p1_id, bet, dice_count, status FROM active_games WHERE game_id=?", (game_id,), fetchone=True)
     
-    p1_name = (await bot.get_chat(p1_id)).first_name
-    p2_name = "Bot" if not p2_id else (await bot.get_chat(p2_id)).first_name
-    
-    if score1 > score2:
-        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, p1_id), commit=True)
-        winner, win_score, lose_score = p1_name, score1, score2
-        win_id = p1_id
-    elif score2 > score1:
-        if p2_id: db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, p2_id), commit=True)
-        winner, win_score, lose_score = p2_name, score2, score1
-        win_id = p2_id
-    else:
-        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p1_id), commit=True)
-        if p2_id: db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (bet, p2_id), commit=True)
-        await message.answer(f"🤝 **Draw!**\nScores: {score1}-{score2}\nBets refunded.", parse_mode="Markdown")
-        return
+    if not game or game[3] != 'waiting':
+        return await call.answer("بازی شروع شده یا منقضی شده است.", show_alert=True)
+    if call.from_user.id == game[0]:
+        return await call.answer("شما نمیتوانید با خودتان بازی کنید!", show_alert=True)
 
-    text = f"🎉 **{winner} Won!**\n\n" \
-           f"Scores: {win_score} - {lose_score}\n" \
-           f"💰 Won Amount: **{win_amount:.2f} HRK** (Fee deducted)"
+    p1_id, bet, d_count = game[0], game[1], game[2]
+    p2_id = call.from_user.id
     
-    # Referral Bonus Logic
-    if win_id:
-        ref = db_query("SELECT referrer FROM users WHERE user_id=?", (win_id,), fetchone=True)
-        if ref and ref[0]:
-            ref_bonus = bet * 0.20
-            db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (ref_bonus, ref[0]), commit=True)
-            
-    await message.answer(text, parse_mode="Markdown")
+    user2 = db_query("SELECT balance FROM users WHERE user_id=?", (p2_id,), fetchone=True)
+    if not user2 or user2[0] < bet:
+        return await call.answer("موجودی شما برای ورود به این بازی کافی نیست.", show_alert=True)
+
+    db_query("UPDATE active_games SET status='playing', p2_id=? WHERE game_id=?", (p2_id, game_id), commit=True)
+    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p1_id), commit=True)
+    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p2_id), commit=True)
+    
+    await call.message.edit_text(f"🎲 بازی بین {(await bot.get_chat(p1_id)).first_name} و {call.from_user.first_name} شروع شد!")
+    
+    p1_score, p2_score = 0, 0
+    await call.message.answer(f"👤 نوبت {(await bot.get_chat(p1_id)).first_name}:")
+    for _ in range(d_count):
+        d = await call.message.answer_dice(emoji="🎲")
+        p1_score += d.dice.value
+        await asyncio.sleep(2.5)
+        
+    await call.message.answer(f"👤 نوبت {call.from_user.first_name}:")
+    for _ in range(d_count):
+        d = await call.message.answer_dice(emoji="🎲")
+        p2_score += d.dice.value
+        await asyncio.sleep(2.5)
+
+    await process_winner(call.message, p1_id, p2_id, p1_score, p2_score, bet)
 
 # ================= FastAPI App Execution =================
 
 @app.on_event("startup")
 async def on_startup():
     if WEBHOOK_URL:
-        await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        # حذف اسلش اضافه در انتهای آدرس در صورت وجود
+        clean_url = WEBHOOK_URL.rstrip('/')
+        await bot.set_webhook(f"{clean_url}/webhook")
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
