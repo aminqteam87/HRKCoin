@@ -18,7 +18,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 SUPPORT_ID = "@Imcivilian"
 HRK_RATE = 10000 # تومان
-FEE_PERCENT = 0.075 # 7.5% کمیسیون ربات
+FEE_PERCENT = 0.075 # 7.5% کمیسیون ربات در بازی‌های گروهی (PvP)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -91,7 +91,7 @@ async def check_channels(user_id):
             member = await bot.get_chat_member(chat_id=ch, user_id=user_id)
             if member.status in ['left', 'kicked']: return False
         except TelegramBadRequest:
-            pass # ربات در کانال ادمین نیست یا کانال وجود ندارد
+            pass
     return True
 
 async def process_winner(message, p1_id, p2_id, score1, score2, bet):
@@ -147,6 +147,8 @@ async def start_cmd(message: types.Message, command: Command):
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 ارسال شماره تماس", request_contact=True)]], resize_keyboard=True)
         await message.answer("👋 سلام! برای استفاده از امکانات ربات ابتدا باید شماره تماس خود را تایید کنید:", reply_markup=kb)
     else:
+        # آپدیت یوزرنیم در صورت تغییر
+        db_query("UPDATE users SET username=? WHERE user_id=?", (message.from_user.username, message.from_user.id), commit=True)
         is_joined = await check_channels(message.from_user.id)
         if not is_joined:
             await message.answer("❌ ابتدا باید در کانال‌های اسپانسر عضو شوید و سپس دوباره /start را ارسال کنید.")
@@ -194,18 +196,30 @@ async def ref_menu(message: types.Message):
 @router.message(F.text == "⚖️ آموزش و مقررات", F.chat.type == 'private')
 async def rules_menu(message: types.Message):
     text = f"📚 **آموزش و مقررات پلتفرم بازی HRK**\n\n" \
-           f"🔸 نرخ هر کوین: **{HRK_RATE:,} تومان**\n\n" \
-           f"🎮 **نحوه بازی در گروه:**\n" \
-           f"ربات را در گروه اد کرده و دستورات زیر را ارسال کنید:\n" \
-           f"🎲 `dice 30` (1 تاس - شرط 30)\n" \
-           f"🎲 `3 dice 50` (3 تاس - شرط 50)"
+           f"🔹 **قوانین مالی:**\n" \
+           f"🔸 نرخ هر کوین HRK در سیستم معادل **{HRK_RATE:,} تومان** می‌باشد.\n" \
+           f"🔸 برای شارژ حساب یا برداشت موجودی، می‌توانید از طریق دکمه «کیف پول» اقدام کرده و با پشتیبانی در ارتباط باشید. پردازش تسویه‌ها به صورت ریالی یا ارز دیجیتال (TON) انجام می‌گردد.\n\n" \
+           f"🎮 **راهنمای جامع بازی‌های گروهی (فقط تاس):**\n" \
+           f"شما می‌توانید ربات را به گروه‌های خود اضافه کرده و با دستورات زیر به ۳ حالت مختلف بازی کنید:\n\n" \
+           f"**۱. بازی کلاسیک رقابتی (بیشترین مجموع):**\n" \
+           f"شما مبلغی شرط می‌بندید و منتظر حریف (ربات یا یک کاربر دیگر) می‌مانید. هرکس تاس بزرگتری بیاورد برنده است. کارمزد این بازی ۷.۵ درصد است.\n" \
+           f"📝 `dice [مبلغ]` 👈 مثال: `dice 30` (یک تاس، شرط ۳۰ کوین)\n" \
+           f"📝 `[تعداد] dice [مبلغ]` 👈 مثال: `3 dice 50` (سه تاس، شرط ۵۰ کوین)\n\n" \
+           f"**۲. بازی زوج و فرد (Even / Odd):**\n" \
+           f"در این حالت شما به تنهایی بازی می‌کنید. پیش‌بینی می‌کنید که عدد تاس زوج می‌آید یا فرد. در صورت برد، **۱.۸ برابر** مبلغ شرط به شما پرداخت می‌شود.\n" \
+           f"📝 `even [مبلغ]` 👈 مثال: `even 20` (شرط روی زوج بودن با ۲۰ کوین)\n" \
+           f"📝 `odd [مبلغ]` 👈 مثال: `odd 20` (شرط روی فرد بودن با ۲۰ کوین)\n\n" \
+           f"**۳. بازی حدس عدد (Guess):**\n" \
+           f"در این حالت شما روی یک عدد خاص (از ۱ تا ۶) شرط می‌بندید. اگر تاس دقیقاً همان عدد را نشان دهد، شما **۵ برابر** مبلغ شرط خود برنده می‌شوید!\n" \
+           f"📝 `guess [مبلغ] [عدد]` 👈 مثال: `guess 10 4` (شرط ۱۰ کوینی روی عدد ۴)"
+           
     await message.answer(text, parse_mode="Markdown")
 
 # --- Wallet Sub-Menus ---
 @router.callback_query(F.data == "wallet_deposit")
 async def deposit_info(call: types.CallbackQuery):
     text = f"📥 **شارژ حساب کاربری**\n\nنرخ توکن: **{HRK_RATE:,} تومان**\n" \
-           f"💬 برای واریز ریالی یا ارزی (TON) به پشتیبانی پیام دهید:"
+           f"💬 برای واریز ریالی یا ارزی (TON) به پشتیبانی پیام دهید. پس از واریز، حساب شما مستقیماً توسط ادمین شارژ خواهد شد."
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎧 ارتباط با پشتیبانی", url=f"https://t.me/{SUPPORT_ID.replace('@','')}")]])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
@@ -306,24 +320,56 @@ async def admin_rem_ch_exec(message: types.Message, state: FSMContext):
 
 @router.message(F.text == "💵 شارژ کاربر", F.from_user.id == ADMIN_ID)
 async def admin_charge_ask(message: types.Message, state: FSMContext):
-    await message.answer("آیدی عددی کاربر:")
+    await message.answer("شناسه کاربر را ارسال کنید.\n(می‌توانید **آیدی عددی** یا **یوزرنیم با @** بفرستید):")
     await state.set_state(AdminFSM.charge_user)
 
 @router.message(AdminFSM.charge_user, F.from_user.id == ADMIN_ID)
 async def admin_charge_u(message: types.Message, state: FSMContext):
-    await state.update_data(user_id=int(message.text))
-    await message.answer("مقدار HRK برای شارژ:")
+    target = message.text.strip()
+    
+    if target.startswith("@"):
+        username = target.replace("@", "")
+        user_record = db_query("SELECT user_id FROM users WHERE username=?", (username,), fetchone=True)
+        if not user_record:
+            await message.answer("❌ کاربری با این یوزرنیم در دیتابیس ربات یافت نشد.")
+            return
+        u_id = user_record[0]
+    elif target.isdigit():
+        u_id = int(target)
+        user_record = db_query("SELECT user_id FROM users WHERE user_id=?", (u_id,), fetchone=True)
+        if not user_record:
+            await message.answer("❌ این آیدی عددی در دیتابیس وجود ندارد.")
+            return
+    else:
+        await message.answer("❌ فرمت نامعتبر! لطفاً آیدی عددی یا یوزرنیم (همراه با @) بفرستید.")
+        return
+
+    await state.update_data(user_id=u_id)
+    await message.answer("مقدار HRK برای شارژ را ارسال کنید:")
     await state.set_state(AdminFSM.charge_amount)
 
 @router.message(AdminFSM.charge_amount, F.from_user.id == ADMIN_ID)
 async def admin_charge_exec(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    amount, u_id = float(message.text), data['user_id']
-    db_query("UPDATE users SET balance = balance + ?, pay_count = pay_count + 1 WHERE user_id=?", (amount, u_id), commit=True)
-    await message.answer(f"✅ کاربر {u_id} مبلغ {amount} HRK شارژ شد.", reply_markup=admin_menu())
-    try: await bot.send_message(u_id, f"🎉 حساب شما **{amount} HRK** شارژ شد!", parse_mode="Markdown")
-    except: pass
-    await state.clear()
+    try:
+        amount = float(message.text)
+        data = await state.get_data()
+        u_id = data['user_id']
+        
+        db_query("UPDATE users SET balance = balance + ?, pay_count = pay_count + 1 WHERE user_id=?", (amount, u_id), commit=True)
+        await message.answer(f"✅ کاربر با آیدی `{u_id}` به مبلغ **{amount} HRK** شارژ شد.", reply_markup=admin_menu(), parse_mode="Markdown")
+        
+        # ارسال نوتیفیکیشن اختصاصی به کاربر
+        notif_text = f"🎉 **موجودی شما افزایش یافت!**\n\n" \
+                     f"مبلغ **{amount} HRK** توسط تیم پشتیبانی به کیف پول شما واریز شد.\n" \
+                     f"اکنون می‌توانید در بازی‌ها شرکت کنید. 🎲"
+        try: 
+            await bot.send_message(u_id, notif_text, parse_mode="Markdown")
+        except Exception:
+            await message.answer("⚠️ مبلغ شارژ شد اما کاربر ربات را بلاک کرده است و نوتیفیکیشن ارسال نشد.")
+            
+        await state.clear()
+    except ValueError:
+        await message.answer("❌ لطفاً یک عدد معتبر ارسال کنید.")
 
 @router.callback_query(F.data.startswith("approve_"), F.from_user.id == ADMIN_ID)
 async def admin_approve_req(call: types.CallbackQuery):
@@ -344,7 +390,16 @@ async def admin_reject_req(call: types.CallbackQuery):
 
 @router.message(F.chat.type.in_({'group', 'supergroup'}), F.text == "بازی ها")
 async def group_games_menu(message: types.Message):
-    text = f"🎮 **راهنمای بازی‌ها**\n\n🎲 `dice 30` (1 تاس با شرط 30)\n🎲 `3 dice 50` (3 تاس با شرط 50)\n💰 `wallet` (موجودی)"
+    text = f"🎮 **راهنمای بازی‌ها (مخصوص تاس)**\n\n" \
+           f"🥇 **حالت کلاسیک (بالاترین امتیاز):**\n" \
+           f"🎲 `dice 30` (۱ تاس با شرط ۳۰)\n" \
+           f"🎲 `3 dice 50` (۳ تاس با شرط ۵۰)\n\n" \
+           f"🥈 **حالت حدس عدد (ضریب برد ۵ برابر):**\n" \
+           f"🎯 `guess 10 4` (شرط ۱۰ کوین روی آمدن عدد ۴)\n\n" \
+           f"🥉 **حالت زوج و فرد (ضریب برد ۱.۸ برابر):**\n" \
+           f"☯️ `even 20` (شرط ۲۰ کوین روی زوج بودن تاس)\n" \
+           f"☯️ `odd 20` (شرط ۲۰ کوین روی فرد بودن تاس)\n\n" \
+           f"💰 برای مشاهده موجودی دستور `wallet` را ارسال کنید."
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ثبت‌نام / شارژ", url=f"https://t.me/{(await bot.get_me()).username}")]])
     await message.reply(text, reply_markup=kb)
 
@@ -356,6 +411,7 @@ async def group_balance(message: types.Message):
     else:
         await message.reply("ابتدا در پیوی ربات /start را بزنید.")
 
+# ---- 1. حالت کلاسیک ----
 @router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.regexp(r'^(\d+ )?dice (\d+(\.\d+)?)$', flags=re.IGNORECASE))
 async def group_dice_init(message: types.Message):
     match = re.match(r'^(\d+ )?dice (\d+(\.\d+)?)$', message.text, re.IGNORECASE)
@@ -449,12 +505,73 @@ async def play_vs_user(call: types.CallbackQuery):
 
     await process_winner(call.message, p1_id, p2_id, p1_score, p2_score, bet)
 
+# ---- 2. حالت زوج و فرد ----
+@router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.regexp(r'^(even|odd) (\d+(\.\d+)?)$', flags=re.IGNORECASE))
+async def group_dice_even_odd(message: types.Message):
+    match = re.match(r'^(even|odd) (\d+(\.\d+)?)$', message.text, re.IGNORECASE)
+    choice = match.group(1).lower()
+    bet = float(match.group(2))
+    
+    user_id = message.from_user.id
+    user = db_query("SELECT balance FROM users WHERE user_id=?", (user_id,), fetchone=True)
+    if not user or user[0] < bet:
+        await message.reply("❌ موجودی کافی نیست یا ثبت‌نام نکرده‌اید.")
+        return
+
+    # کسر مبلغ شرط
+    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, user_id), commit=True)
+    
+    mode_fa = "زوج" if choice == "even" else "فرد"
+    await message.reply(f"🎲 شما مبلغ **{bet} HRK** روی **{mode_fa}** بودن تاس شرط بستید.\nدر حال پرتاب...", parse_mode="Markdown")
+    
+    d = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(3.5)
+    val = d.dice.value
+    
+    is_even = (val % 2 == 0)
+    user_won = (is_even and choice == "even") or (not is_even and choice == "odd")
+    
+    if user_won:
+        win_amount = bet * 1.8
+        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, user_id), commit=True)
+        await message.reply(f"🎉 **برنده شدی!** تاس روی {val} نشست.\nمبلغ **{win_amount:.2f} HRK** به حسابت واریز شد.", parse_mode="Markdown")
+    else:
+        await message.reply(f"💥 **باختی!** تاس روی {val} نشست.", parse_mode="Markdown")
+
+# ---- 3. حالت حدس عدد ----
+@router.message(F.chat.type.in_({'group', 'supergroup'}), F.text.regexp(r'^guess (\d+(\.\d+)?) ([1-6])$', flags=re.IGNORECASE))
+async def group_dice_guess(message: types.Message):
+    match = re.match(r'^guess (\d+(\.\d+)?) ([1-6])$', message.text, re.IGNORECASE)
+    bet = float(match.group(1))
+    target_num = int(match.group(3))
+    
+    user_id = message.from_user.id
+    user = db_query("SELECT balance FROM users WHERE user_id=?", (user_id,), fetchone=True)
+    if not user or user[0] < bet:
+        await message.reply("❌ موجودی کافی نیست یا ثبت‌نام نکرده‌اید.")
+        return
+
+    # کسر مبلغ شرط
+    db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, user_id), commit=True)
+    
+    await message.reply(f"🎯 شما مبلغ **{bet} HRK** روی عدد **{target_num}** شرط بستید.\nدر حال پرتاب...", parse_mode="Markdown")
+    
+    d = await message.answer_dice(emoji="🎲")
+    await asyncio.sleep(3.5)
+    val = d.dice.value
+    
+    if val == target_num:
+        win_amount = bet * 5.0
+        db_query("UPDATE users SET balance = balance + ? WHERE user_id=?", (win_amount, user_id), commit=True)
+        await message.reply(f"🔥 **جکپات! دقیق حدس زدی!**\nمبلغ **{win_amount:.2f} HRK** به حسابت واریز شد.", parse_mode="Markdown")
+    else:
+        await message.reply(f"💥 **باختی!** تاس روی {val} نشست.", parse_mode="Markdown")
+
 # ================= FastAPI App Execution =================
 
 @app.on_event("startup")
 async def on_startup():
     if WEBHOOK_URL:
-        # حذف اسلش اضافه در انتهای آدرس در صورت وجود
         clean_url = WEBHOOK_URL.rstrip('/')
         await bot.set_webhook(f"{clean_url}/webhook")
 
