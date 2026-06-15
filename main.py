@@ -50,7 +50,9 @@ def db_query(query, args=(), fetchone=False, fetchall=False, commit=False):
     res = None
     if fetchone: res = c.fetchone()
     if fetchall: res = c.fetchall()
-    if commit: conn.commit()
+    if commit: 
+        conn.commit()
+        res = c.lastrowid  # برگرداندن شناسه آخرین رکورد ثبت شده در همین اتصال
     conn.close()
     return res
 
@@ -427,9 +429,9 @@ async def group_dice_init(message: types.Message):
         await message.reply("❌ موجودی کافی نیست یا ثبت‌نام نکرده‌اید.")
         return
 
-    db_query("INSERT INTO active_games (chat_id, p1_id, bet, dice_count, status) VALUES (?, ?, ?, ?, 'waiting')",
+    # دریافت مستقیم آیدی سطر ایجاد شده از خروجی db_query به کمک اصلاحیه تابع دیتابیس
+    game_id = db_query("INSERT INTO active_games (chat_id, p1_id, bet, dice_count, status) VALUES (?, ?, ?, ?, 'waiting')",
              (message.chat.id, message.from_user.id, bet, dice_count), commit=True)
-    game_id = db_query("SELECT last_insert_rowid()", fetchone=True)[0]
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤖 بازی با ربات", callback_data=f"playbot_{game_id}"),
@@ -447,6 +449,7 @@ async def play_vs_bot(call: types.CallbackQuery):
     if call.from_user.id != game[0]:
         return await call.answer("فقط سازنده میتواند بازی با ربات را انتخاب کند.", show_alert=True)
 
+    await call.answer() # متوقف کردن لودینگ دکمه شیشه‌ای تگرام
     db_query("UPDATE active_games SET status='playing' WHERE game_id=?", (game_id,), commit=True)
     await call.message.edit_text("🎲 در حال پرتاب تاس با ربات...")
     p1_id, bet, d_count = game[0], game[1], game[2]
@@ -477,13 +480,14 @@ async def play_vs_user(call: types.CallbackQuery):
     if call.from_user.id == game[0]:
         return await call.answer("شما نمیتوانید با خودتان بازی کنید!", show_alert=True)
 
-    p1_id, bet, d_count = game[0], game[1], game[2]
     p2_id = call.from_user.id
-    
     user2 = db_query("SELECT balance FROM users WHERE user_id=?", (p2_id,), fetchone=True)
-    if not user2 or user2[0] < bet:
+    if not user2 or user2[0] < game[1]:
         return await call.answer("موجودی شما برای ورود به این بازی کافی نیست.", show_alert=True)
 
+    await call.answer() # متوقف کردن لودینگ دکمه شیشه‌ای تگرام
+    p1_id, bet, d_count = game[0], game[1], game[2]
+    
     db_query("UPDATE active_games SET status='playing', p2_id=? WHERE game_id=?", (p2_id, game_id), commit=True)
     db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p1_id), commit=True)
     db_query("UPDATE users SET balance = balance - ? WHERE user_id=?", (bet, p2_id), commit=True)
